@@ -1,0 +1,4 @@
+default  async clients=1   stock   91,815  patched   92,567  ratio 1.01x
+default  sync  clients=16  stock   25,473  patched   27,274  ratio 1.07x
+always   async clients=4   stock    5,011  patched   70,930  ratio 14.15x
+always   sync  clients=64  stock    3,337  patched   18,027  ratio 5.40x

@@ -1,0 +1,257 @@
+diff --git a/server/jetstream_group_commit_test.go b/server/jetstream_group_commit_test.go
+new file mode 100644
+index 0000000..c24c540
+--- /dev/null
++++ b/server/jetstream_group_commit_test.go
+@@ -0,0 +1,161 @@
++// Copyright 2026 The NATS Authors
++// Licensed under the Apache License, Version 2.0 (the "License");
++// you may not use this file except in compliance with the License.
++// You may obtain a copy of the License at
++//
++// http://www.apache.org/licenses/LICENSE-2.0
++//
++// Unless required by applicable law or agreed to in writing, software
++// distributed under the License is distributed on an "AS IS" BASIS,
++// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++// See the License for the specific language governing permissions and
++// limitations under the License.
++
++package server
++
++import (
++	"fmt"
++	"strconv"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/nats-io/nats.go"
++)
++
++func groupCommitServer(t *testing.T, syncAlways bool, atomic bool) (*Server, *stream, *fileStore, *nats.Conn, nats.JetStreamContext) {
++	t.Helper()
++	extra := ""
++	if syncAlways {
++		extra = "sync_interval: always"
++	}
++	conf := createConfFile(t, []byte(fmt.Sprintf(`
++		listen: 127.0.0.1:-1
++		jetstream: {
++			store_dir: %q
++			%s
++		}
++	`, t.TempDir(), extra)))
++	s, _ := RunServerWithConfig(conf)
++	nc, js := jsClientConnect(t, s)
++	_, err := jsStreamCreate(t, nc, &StreamConfig{
++		Name:               "TEST",
++		Subjects:           []string{"gc.>"},
++		Storage:            FileStorage,
++		Replicas:           1,
++		AllowAtomicPublish: atomic,
++	})
++	require_NoError(t, err)
++	mset, err := s.globalAccount().lookupStream("TEST")
++	require_NoError(t, err)
++	return s, mset, mset.store.(*fileStore), nc, js
++}
++
++// A burst of async publishes on a sync_interval: always stream must be acked in
++// order with contiguous sequences, fully stored, and leave the store in SyncAlways.
++func TestJetStreamGroupCommitSyncAlwaysAsyncBurst(t *testing.T) {
++	s, _, fs, nc, js := groupCommitServer(t, true, false)
++	defer s.Shutdown()
++	defer nc.Close()
++
++	const n = 2000
++	futures := make([]nats.PubAckFuture, 0, n)
++	for i := 0; i < n; i++ {
++		f, err := js.PublishAsync("gc.x", []byte(strconv.Itoa(i)))
++		require_NoError(t, err)
++		futures = append(futures, f)
++	}
++	select {
++	case <-js.PublishAsyncComplete():
++	case <-time.After(30 * time.Second):
++		t.Fatalf("timed out waiting for acks")
++	}
++	seen := make(map[uint64]bool, n)
++	for i, f := range futures {
++		select {
++		case pa := <-f.Ok():
++			if seen[pa.Sequence] {
++				t.Fatalf("duplicate sequence %d", pa.Sequence)
++			}
++			seen[pa.Sequence] = true
++			if pa.Sequence != uint64(i+1) {
++				t.Fatalf("publish %d acked with sequence %d, expected %d", i, pa.Sequence, i+1)
++			}
++		case err := <-f.Err():
++			t.Fatalf("publish %d failed: %v", i, err)
++		}
++	}
++	si, err := js.StreamInfo("TEST")
++	require_NoError(t, err)
++	require_Equal(t, si.State.Msgs, uint64(n))
++	require_Equal(t, si.State.LastSeq, uint64(n))
++	require_True(t, fs.syncAlways.Load())
++	require_False(t, fs.syncOnFlush.Load())
++}
++
++// An atomic batch arriving in the middle of a group must still commit as one unit,
++// and the surrounding ordinary messages must all be stored.
++func TestJetStreamGroupCommitAtomicBatchInterleaved(t *testing.T) {
++	s, _, fs, nc, js := groupCommitServer(t, true, true)
++	defer s.Shutdown()
++	defer nc.Close()
++
++	for i := 0; i < 500; i++ {
++		_, err := js.PublishAsync("gc.x", []byte("before"))
++		require_NoError(t, err)
++	}
++	for seq := 1; seq <= 3; seq++ {
++		m := nats.NewMsg("gc.batch")
++		m.Header.Set(JSBatchId, "b1")
++		m.Header.Set(JSBatchSeq, strconv.Itoa(seq))
++		if seq < 3 {
++			require_NoError(t, nc.PublishMsg(m))
++			continue
++		}
++		m.Header.Set(JSBatchCommit, "1")
++		resp, err := nc.RequestMsg(m, 10*time.Second)
++		require_NoError(t, err)
++		if !strings.Contains(string(resp.Data), `"count":3`) {
++			t.Fatalf("unexpected batch ack: %s", resp.Data)
++		}
++	}
++	for i := 0; i < 500; i++ {
++		_, err := js.PublishAsync("gc.x", []byte("after"))
++		require_NoError(t, err)
++	}
++	select {
++	case <-js.PublishAsyncComplete():
++	case <-time.After(30 * time.Second):
++		t.Fatalf("timed out waiting for acks")
++	}
++	si, err := js.StreamInfo("TEST")
++	require_NoError(t, err)
++	require_Equal(t, si.State.Msgs, uint64(1003))
++	require_True(t, fs.syncAlways.Load())
++	require_False(t, fs.syncOnFlush.Load())
++}
++
++// Grouping must engage only for sync_interval: always and must always release isolateMu.
++func TestJetStreamGroupCommitOnlyForSyncAlways(t *testing.T) {
++	for _, always := range []bool{true, false} {
++		t.Run(fmt.Sprintf("syncAlways=%v", always), func(t *testing.T) {
++			s, mset, fs, nc, _ := groupCommitServer(t, always, false)
++			defer s.Shutdown()
++			defer nc.Close()
++
++			gfs := mset.groupSyncBegin()
++			if !always {
++				require_True(t, gfs == nil)
++			} else {
++				require_True(t, gfs == fs)
++				require_True(t, fs.syncOnFlush.Load())
++				require_False(t, fs.syncAlways.Load())
++				require_True(t, mset.groupSyncEnd(gfs) == nil)
++				require_True(t, fs.syncAlways.Load())
++				require_False(t, fs.syncOnFlush.Load())
++			}
++			require_True(t, mset.isolateMu.TryLock())
++			mset.isolateMu.Unlock()
++		})
++	}
++}
+diff --git a/server/stream.go b/server/stream.go
+index 13bc49f..0790512 100644
+--- a/server/stream.go
++++ b/server/stream.go
+@@ -8577,6 +8577,52 @@ func (mset *stream) nameLocked(needLock bool) string {
+ 	return mset.cfg.Name
+ }
+ 
++// groupSyncBegin starts a group commit for a run of queued messages on a
++// single-server stream whose file store syncs every write (sync_interval: always).
++// It reuses the mechanism atomic batches use: switch the store to SyncOnFlush so
++// each write skips its own fsync, and hold isolateMu so direct reads cannot see
++// the run before it is durable. It returns nil when grouping does not apply.
++func (mset *stream) groupSyncBegin() *fileStore {
++	fs, ok := mset.store.(*fileStore)
++	// Lock-free check first so streams without sync_interval: always never take a lock here.
++	if !ok || !fs.syncAlways.Load() {
++		return nil
++	}
++	mset.isolateMu.Lock()
++	fs.mu.Lock()
++	if !fs.syncAlways.Load() {
++		fs.mu.Unlock()
++		mset.isolateMu.Unlock()
++		return nil
++	}
++	fs.updateDurabilitySettingsLocked(true)
++	fs.mu.Unlock()
++	return fs
++}
++
++// groupSyncEnd commits the run with a single flush and fsync, then restores
++// SyncAlways. Publish acks for the run are queued on mset.outq, and only
++// internalLoop drains that queue, so no ack reaches a client before this
++// fsync returns. If the fsync fails, the queued acks are dropped so the server
++// never acknowledges a write that may not be durable. Always returns nil.
++func (mset *stream) groupSyncEnd(fs *fileStore) *fileStore {
++	if fs == nil {
++		return nil
++	}
++	err := fs.FlushAllPending()
++	fs.mu.Lock()
++	fs.resetDurabilitySettingsLocked()
++	fs.mu.Unlock()
++	mset.isolateMu.Unlock()
++	if err != nil {
++		mset.setWriteErr(err)
++		if pms := mset.outq.pop(); pms != nil {
++			mset.outq.recycle(&pms)
++		}
++	}
++	return nil
++}
++
+ func (mset *stream) internalLoop() {
+ 	mset.mu.RLock()
+ 	setGoRoutineLabels(pprofLabels{
+@@ -8673,20 +8719,32 @@ func (mset *stream) internalLoop() {
+ 			// This can possibly change now so needs to be checked here.
+ 			isClustered := mset.IsClustered()
+ 			ims := msgs.pop()
++			// Group commit: when several messages are already queued on a single-server
++			// SyncAlways file store, store them with one shared fsync. See groupSyncBegin.
++			var gfs *fileStore
++			if !isClustered && len(ims) > 1 {
++				gfs = mset.groupSyncBegin()
++			}
+ 			for _, im := range ims {
+ 				// If we are clustered we need to propose this message to the underlying raft group.
+ 				if batch, err := getFastBatch(im.rply, im.hdr); batch != nil || err {
++					gfs = mset.groupSyncEnd(gfs)
+ 					mset.processJetStreamFastBatchMsg(batch, im.subj, im.rply, im.hdr, im.msg, im.mt)
+ 					batch.returnToPool()
+ 				} else if batchId := getBatchId(im.hdr); batchId != _EMPTY_ {
++					gfs = mset.groupSyncEnd(gfs)
+ 					mset.processJetStreamAtomicBatchMsg(batchId, im.subj, im.rply, im.hdr, im.msg, im.mt)
+ 				} else if isClustered {
+ 					mset.processClusteredInboundMsg(im.subj, im.rply, im.hdr, im.msg, im.mt, false)
++				} else if gfs != nil {
++					// isolateMu is already held across the group by groupSyncBegin.
++					mset.processJetStreamMsg(im.subj, im.rply, im.hdr, im.msg, 0, 0, im.mt, false, false)
+ 				} else {
+ 					mset.processJetStreamMsg(im.subj, im.rply, im.hdr, im.msg, 0, 0, im.mt, false, true)
+ 				}
+ 				im.returnToPool()
+ 			}
++			mset.groupSyncEnd(gfs)
+ 			msgs.recycle(&ims)
+ 		case <-gets.ch:
+ 			dgs := gets.pop()
