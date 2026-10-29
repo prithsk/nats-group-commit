@@ -74,3 +74,11 @@ A fresh sandbox with a median fsync of 0.169 ms (vs 0.120 ms above), running rep
 The speedup grows as fsync gets slower, as predicted. The default-mode check read 0.9x in that single run;
 four alternating repeats gave medians of 98,196 (stock) and 104,593 (patched), 1.07x, with stock alone ranging
 from 92,371 to 113,847. That was noise, and reproduce.sh now reports medians of 3 alternating runs.
+
+## Control: a disk where fsync costs nothing
+
+On a 16-CPU laptop under WSL2, fsync measured 0.000 ms: the virtual disk does not wait for the physical drive. There,
+stock and patched performed the same, from 0.9x to 1.0x across all workloads, with medians of 3 alternating runs.
+That is the expected result. The patch removes fsync cost, so it helps in proportion to how slow fsync is: 16x at
+0.120 ms and 27x at 0.169 ms on real ext4 disks, and nothing where fsync is free. Stock durable mode on WSL2 is
+also not truly durable, since its fsync never reaches the drive.
