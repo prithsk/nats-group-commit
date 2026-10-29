@@ -11,16 +11,17 @@ treatment: messages that are already queued share one fsync, and each ack still 
 ## Results
 
 <!-- results:start -->
-| sync_interval: always | Stock 2.15.1 | Patched | Speedup |
-|---|---|---|---|
-| 1 sync publisher | 3,417 msg/s | 3,443 msg/s | 1.0x |
-| 64 sync publishers | 4,052 msg/s | 22,945 msg/s | 5.7x |
-| 4 async publishers | 5,695 msg/s | 90,999 msg/s | 16.0x |
+On 16 CPUs, with a median fsync of 0.000 ms on this disk. nats-server v2.15.1, 128-byte messages, R1 file stream. Medians of 3 alternating runs.
 
-On a second machine with a slower disk (fsync 0.169 ms vs 0.120 ms), 4 async publishers went from 3,739 to
-101,896 msg/s, 27.3x: the slower the disk, the bigger the gain. Default mode is unchanged. In five simulated power cuts with LazyFS, the patched server lost zero acked
-messages, matching stock `always`; stock default mode lost every acked message in all three control runs.
-Full numbers are in [results/results.md](results/results.md).
+| Workload | Stock | Patched | Speedup |
+|---|---|---|---|
+| sync_interval: always, 1 sync publisher | 1,774 msg/s | 1,652 msg/s | 0.9x |
+| sync_interval: always, 64 sync publishers | 17,470 msg/s | 16,456 msg/s | 0.9x |
+| sync_interval: always, 4 async publishers | 106,953 msg/s | 110,631 msg/s | 1.0x |
+| default mode, 4 async publishers (regression check) | 114,318 msg/s | 111,122 msg/s | 1.0x |
+
+Sandbox numbers, the syscall-trace check and the LazyFS power-cut results are in [results/results.md](results/results.md).
+
 <!-- results:end -->
 
 ## What the code does today
