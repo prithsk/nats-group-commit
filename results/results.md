@@ -82,3 +82,17 @@ stock and patched performed the same, from 0.9x to 1.0x across all workloads, wi
 That is the expected result. The patch removes fsync cost, so it helps in proportion to how slow fsync is: 16x at
 0.120 ms and 27x at 0.169 ms on real ext4 disks, and nothing where fsync is free. Stock durable mode on WSL2 is
 also not truly durable, since its fsync never reaches the drive.
+
+## GitHub Codespaces, a standard cloud disk
+
+2 CPUs, median fsync 0.283 ms, medians of 3 alternating rounds.
+
+| Workload | Stock | Patched | Speedup |
+|---|---|---|---|
+| sync_interval: always, 1 sync publisher | 1,870 msg/s | 1,870 msg/s | 1.0x |
+| sync_interval: always, 64 sync publishers | 2,814 msg/s | 18,620 msg/s | 6.6x |
+| sync_interval: always, 4 async publishers | 2,532 msg/s | 56,939 msg/s | 22.5x |
+| default mode, 4 async publishers | 106,390 msg/s | 111,914 msg/s | 1.05x |
+
+The async rounds varied widely on this shared 2-CPU machine: patched ran at 107,036, 18,075 and 56,939 msg/s
+against stock at 2,636, 1,908 and 2,532, so per-round speedups ranged from 9.5x to 41x.

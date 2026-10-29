@@ -11,15 +11,15 @@ treatment: messages that are already queued share one fsync, and each ack still 
 ## Results
 
 <!-- results:start -->
-| sync_interval: always | Stock 2.15.1 | Patched | Speedup |
+| sync_interval: always | Sandbox, fsync 0.120 ms | Sandbox, fsync 0.169 ms | GitHub Codespaces, fsync 0.283 ms |
 |---|---|---|---|
-| 1 sync publisher | 3,417 msg/s | 3,443 msg/s | 1.0x |
-| 64 sync publishers | 4,052 msg/s | 22,945 msg/s | 5.7x |
-| 4 async publishers | 5,695 msg/s | 90,999 msg/s | 16.0x |
+| 1 sync publisher | 1.0x | 1.0x | 1.0x |
+| 64 sync publishers | 5.7x | 5.8x | 6.6x |
+| 4 async publishers | 16.0x | 27.3x | 22.5x |
 
-On a second machine with a slower disk (fsync 0.169 ms vs 0.120 ms), 4 async publishers went from 3,739 to
-101,896 msg/s, 27.3x: the slower the disk, the bigger the gain. Default mode is unchanged. In five simulated power cuts with LazyFS, the patched server lost zero acked
-messages, matching stock `always`; stock default mode lost every acked message in all three control runs.
+On the cloud disk, durable async publishing went from 2,532 to 56,939 msg/s, the median of 3 alternating rounds, which
+ranged from 9.5x to 41x. Default mode is unchanged on every machine. In five simulated power cuts with LazyFS, the
+patched server lost zero acked messages. On WSL2, where fsync is free, the patch changes nothing, as expected.
 Full numbers are in [results/results.md](results/results.md).
 <!-- results:end -->
 
